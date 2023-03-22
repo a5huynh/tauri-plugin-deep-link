@@ -102,32 +102,6 @@ fn secondary_handler(s: String) {
 }
 
 pub fn listen<F: FnMut(String) + Send + 'static>(handler: F) -> Result<()> {
-    #[cfg(debug_assertions)]
-    let addr = format!(
-        "/tmp/{}-deep-link.sock",
-        ID.get().expect("listen() called before prepare()")
-    );
-
-    #[cfg(debug_assertions)]
-    if HANDLER
-        .set(match UnixStream::connect(&addr) {
-            Ok(_) => Mutex::new(Box::new(secondary_handler)),
-            Err(err) => {
-                log::error!("Error creating socket listener: {}", err.to_string());
-                if err.kind() == ErrorKind::ConnectionRefused {
-                    let _ = remove_file(&addr);
-                }
-                Mutex::new(Box::new(handler))
-            }
-        })
-        .is_err()
-    {
-        return Err(std::io::Error::new(
-            ErrorKind::AlreadyExists,
-            "Handler was already set",
-        ));
-    }
-
     #[cfg(not(debug_assertions))]
     if HANDLER.set(Mutex::new(Box::new(handler))).is_err() {
         return Err(std::io::Error::new(
@@ -151,27 +125,57 @@ pub fn listen<F: FnMut(String) + Send + 'static>(handler: F) -> Result<()> {
     }
 
     #[cfg(debug_assertions)]
-    std::thread::spawn(move || {
-        let listener = UnixListener::bind(addr).expect("Can't create listener");
+    {
+        let addr = format!(
+            "/tmp/{}-deep-link.sock",
+            ID.get().expect("listen() called before prepare()")
+        );
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(mut stream) => {
-                    let mut buffer = String::new();
-                    if let Err(io_err) = stream.read_to_string(&mut buffer) {
-                        log::error!("Error reading incoming connection: {}", io_err.to_string());
-                    };
+        let addr_clone = addr.clone();
+        std::thread::spawn(move || {
+            let listener = UnixListener::bind(addr_clone).expect("Can't create listener");
 
-                    let mut cb = HANDLER.get().unwrap().lock().unwrap();
-                    cb(buffer);
-                }
-                Err(err) => {
-                    log::error!("Incoming connection failed: {}", err);
-                    continue;
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(mut stream) => {
+                        let mut buffer = String::new();
+                        if let Err(io_err) = stream.read_to_string(&mut buffer) {
+                            log::error!(
+                                "Error reading incoming connection: {}",
+                                io_err.to_string()
+                            );
+                        };
+
+                        let mut cb = HANDLER.get().unwrap().lock().unwrap();
+                        cb(buffer);
+                    }
+                    Err(err) => {
+                        log::error!("Incoming connection failed: {}", err);
+                        continue;
+                    }
                 }
             }
+        });
+
+        if HANDLER
+            .set(match UnixStream::connect(&addr) {
+                Ok(_) => Mutex::new(Box::new(secondary_handler)),
+                Err(err) => {
+                    log::error!("Error creating socket listener: {}", err.to_string());
+                    if err.kind() == ErrorKind::ConnectionRefused {
+                        let _ = remove_file(&addr);
+                    }
+                    Mutex::new(Box::new(handler))
+                }
+            })
+            .is_err()
+        {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "Handler was already set",
+            ));
         }
-    });
+    }
 
     Ok(())
 }
